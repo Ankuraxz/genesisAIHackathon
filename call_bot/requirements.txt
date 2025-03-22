@@ -1,1 +1,8 @@
 websockets==10.1
+fastapi
+twilio
+dotenv
+uvicorn
+pyaudio
+certifi
+python-multipart
