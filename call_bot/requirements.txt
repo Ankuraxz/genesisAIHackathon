@@ -6,3 +6,7 @@ uvicorn
 pyaudio
 certifi
 python-multipart
+openai
+google-cloud-firestore
+google-cloud-storage
+firebase-admin

@@ -12,7 +12,7 @@ from twilio.twiml.voice_response import VoiceResponse, Connect, Say, Stream
 from dotenv import load_dotenv
 import logging
 
-
+from call_bot.tools import classify_and_create_ticket
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -26,9 +26,23 @@ PORT = int(os.getenv('PORT', 5050))
 
 
 SYSTEM_MESSAGE = (
-  "You are an emergency relief bot. Start talking first by introducing yourself, Please ask the caller the following questions in order: 1. What is your name?, Confirm the name again humbley 2. What is the nature of the emergency? 3. What is the location of the emergency? 5. Are you safe and are you with someone? 6. Do you need immediate help?,  Ask these questions, after every next reply, answer what user mentioned previously like his name, location, is he with family, is he safe etc. and mention that help is on the way, give them few tips to be safe using your knowledge , ask them to stay safe and gracefully hangup"
+    '''
+    You are the Emergency Relief Bot. Your job is to gather critical details quickly while keeping the user calm. Follow these steps exactly, keeping all responses short, clear, and reassuring:
 
+    Ask the user what the emergency is.
+    
+    Confirm their response briefly, then ask for the location and confirm that as well properly.
+    
+    If medical, ask about the person's condition. If fire, ask about people in danger. If crime, ask about the suspect.
+    
+    Confirm each response before moving on. Escalate immediately if severe, (otherwise take in information properly)  by saying Escalating Now and hangup.
+    
+    Once help is on the way, reassure the user and end the conversation unless they need more assistance.
+    
+    Maintain a composed, natural tone. Keep all responses efficient. Say goodbye once all information is collected.
+  '''
 )
+# "Hello, I am Emergency Relief bot, and I am here to assist you in this emergency. Please stay calm, and I will gather the necessary information to ensure you get the help you need as quickly as possible. First, can you tell me your name? Thank you, [Caller’s Name]. Just to confirm, your name is [Caller’s Name], correct? Now, can you describe the nature of the emergency? I want to make sure I fully understand the situation so I can assist you effectively. Where is the emergency located? Please provide the address or as many details as possible, and I will repeat it back to confirm accuracy. Are you currently safe? Are you alone, or is someone with you? Your safety is my priority. Do you need immediate help? Is this a life-threatening situation? Can you see smoke or fire? Are you experiencing difficulty breathing? Who needs help—you or someone else? I will confirm your details as we go to ensure everything is accurate. Please know that help is already on the way. In the meantime, here are a few important safety tips: (Provide relevant guidance based on the emergency, such as staying low in smoke, avoiding unnecessary movement if injured, or remaining in a safe place.) Stay calm, [Caller’s Name]. You are not alone, and help is coming. If you need anything else, I am here for you. Stay safe, and I will now end this call unless you need further assistance. MAKE SURE YOUR QUESTIONS ARE SMALL, WITHOUT MUCH THANKS. DO REPEAT EACH DETAIL USER, IN CONSISE FASHION TELLS YOU TO CONFIRM BEFORE ASKING NEXT QUESTION"
 # Use your knowledge what actual cities and states exist in the US & Canada to make sure you properly transcibe the correct city and state from the caller. Use following template - In a wildfire situation, a fire department marshal would ask the caller several key questions to assess the situation. First, they would ask for the exact location, whether the caller is in immediate danger, their name and contact number, if others are with them (including children, elderly, or disabled individuals), and whether they have a safe way out or are trapped. Next, they would inquire about the fire and smoke, including whether flames or just smoke are visible, the color of the smoke, how fast the fire is spreading, what is burning, and if there are any explosions or strange sounds. Environmental and weather conditions are also assessed, such as the direction of the wind, if there is flying debris or embers, if nearby roads are blocked, and if there are power outages or downed power lines. The marshal would also ask about evacuation and shelter status, including whether the caller has been told to evacuate, knows the nearest evacuation route, is in a safe place, has transportation, and if they are sheltering in place with enough water, food, and protective gear. Additional risks and hazards would be discussed, including the presence of hazardous materials, trapped or injured people, and pets or animals in danger. Finally, the marshal would give instructions to stay calm, prepare to evacuate or shelter if safe, cover the nose and mouth with a damp cloth to avoid smoke inhalation, and not return to the area until authorities declare it safe.
 VOICE = 'alloy'
 LOG_EVENT_TYPES = [
@@ -69,7 +83,7 @@ async def handle_media_stream(websocket: WebSocket):
     # Initialize conversation transcript
 
     async with websockets.connect(
-            'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01',
+            'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview',
             extra_headers={
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
                 "OpenAI-Beta": "realtime=v1"
@@ -97,6 +111,7 @@ async def handle_media_stream(websocket: WebSocket):
                             "type": "input_audio_buffer.append",
                             "audio": data['media']['payload']
                         }
+
                         await openai_ws.send(json.dumps(audio_append))
                     elif data['event'] == 'start':
                         stream_sid = data['start']['streamSid']
@@ -107,6 +122,10 @@ async def handle_media_stream(websocket: WebSocket):
                     elif data['event'] == 'mark':
                         if mark_queue:
                             mark_queue.pop(0)
+                    elif data['event'] == 'stop':
+                        print("Stream has stopped.")
+                        save_transcript(transcripts)
+
             except WebSocketDisconnect:
                 print("Client disconnected.")
 
@@ -120,7 +139,7 @@ async def handle_media_stream(websocket: WebSocket):
                         print(f"Received event: {response['type']}", response)
 
                     # Record user's transcribed speech
-                    if response.get('type') == 'response.done' and response.get('response'):
+                    if response.get('type') == 'response.done' and len(response.get('response').get('output'))==1:
                         responsex = response.get('response')
                         transcript = responsex.get('output')[0].get('content')[0].get('transcript')
 
@@ -128,16 +147,18 @@ async def handle_media_stream(websocket: WebSocket):
                             transcripts.append({'role': 'AI', 'text': transcript})
                             print(f"AI: {transcript}")
 
-                            if "goodbye" in transcript.lower():
+                            if "goodbye" in transcript.lower() or "end this call" in transcript.lower() or "escalating now" in transcript.lower():
+                                if "escalating now" in transcript.lower():
+                                    transcripts.append({'role': 'AI', 'text': "Escalated case"})
                                 save_transcript(transcripts)
                                 transcripts = []  # Clear transcripts after saving
 
                     # Record AI's response
-                    if response.get('type') == 'response.done' and response.get('response').get('output')[0]:
+                    if response.get('type') == 'response.done' and response.get('response').get('output'):
                         responsex = response.get('response')
                         # print(f"Response: {responsex}")
                         transcript = responsex.get('output')[0].get('content')[0].get('transcript')
-                        transcripts.append(transcript)
+                        transcripts.append(json.dumps(transcript))
                         # print(f"Transcript: {transcript}")
                         if "goodbye" in transcript.lower():
                             save_transcript(transcript)
@@ -227,10 +248,12 @@ def save_transcript(transcripts):
     :return: True if the transcript was saved successfully, False otherwise
     """
     try:
-        logger.info(f"Saving call transcript: {transcripts}")
-        with open("transcripts.txt", 'w') as transcript_file:
-            for transcript in transcripts:
-                transcript_file.write(json.dumps(transcript))
+        # logger.info(f"Saving call transcript: {transcripts}")
+        # with open("transcripts.txt", 'w') as transcript_file:
+        #     for transcript in transcripts:
+        #         transcript_file.write(json.dumps(transcript))
+        print(transcripts)
+        classify_and_create_ticket(transcripts)
         # Save the transcript to a database
     except Exception as e:
         logger.error(f"Error saving call transcript: {str(e)}")
